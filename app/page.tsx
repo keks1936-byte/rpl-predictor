@@ -1,95 +1,142 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { calculatePoints, Score } from '../lib/scoring'
 
-const players = ['Кирилл', 'Саша', 'Стас', 'Дима'] as const
-type Player = typeof players[number]
+const SUPABASE_URL = 'https://imjzkiwgkvrxafqweeei.supabase.co'
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImltanpraXdna3ZyeGFmcXdlZWVpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODY1NTY4MTQsImV4cCI6MjEwMjEzMjgxNH0.Iii9aQqBAMBAk7ru5rD0VDpLXro6ZERSoBZgL0t2gbQ'
+const headers = { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` }
+
 type Tab = 'round' | 'predictions' | 'table'
-type Match = { id: string; home: string; away: string; result?: Score; predictions?: Partial<Record<Player, Score>> }
-type Round = { number: number; matches: Match[] }
-type Predictions = Record<Player, Record<string, Score>>
-type Results = Record<string, Score>
+type Player = { id: string; name: string; sort_order: number }
+type Round = { id: string; round_number: number; status: 'upcoming' | 'open' | 'locked' | 'finished' }
+type Match = { id: string; round_id: string; home_team: string; away_team: string; home_score: number | null; away_score: number | null }
+type PredictionRow = { match_id: string; player_id: string; home_score: number; away_score: number }
 
-const rounds: Round[] = [
-  { number: 1, matches: [
-    { id:'r1m1', home:'Спартак', away:'Родина', result:{home:3,away:0}, predictions:{Кирилл:{home:3,away:1},Саша:{home:0,away:1},Стас:{home:2,away:0},Дима:{home:3,away:0}} },
-    { id:'r1m2', home:'Локомотив', away:'Ахмат', result:{home:1,away:1}, predictions:{Кирилл:{home:1,away:1},Саша:{home:3,away:1},Стас:{home:1,away:1},Дима:{home:2,away:1}} },
-    { id:'r1m3', home:'Рубин', away:'Краснодар', result:{home:1,away:3}, predictions:{Кирилл:{home:1,away:1},Саша:{home:1,away:1},Стас:{home:1,away:2},Дима:{home:0,away:1}} }
-  ]},
-  { number: 2, matches: [
-    { id:'r2m1', home:'Динамо Мх', away:'Локомотив', result:{home:2,away:1}, predictions:{Кирилл:{home:1,away:1},Саша:{home:1,away:2},Стас:{home:0,away:2},Дима:{home:0,away:1}} },
-    { id:'r2m2', home:'Балтика', away:'Динамо', result:{home:2,away:1}, predictions:{Кирилл:{home:1,away:2},Саша:{home:1,away:1},Стас:{home:0,away:1},Дима:{home:0,away:0}} },
-    { id:'r2m3', home:'Ахмат', away:'Спартак', result:{home:1,away:2}, predictions:{Кирилл:{home:1,away:1},Саша:{home:2,away:1},Стас:{home:1,away:3},Дима:{home:0,away:1}} }
-  ]},
-  { number: 3, matches: [
-    { id:'r3m1', home:'Локомотив', away:'Акрон', result:{home:0,away:0}, predictions:{Кирилл:{home:1,away:0},Саша:{home:3,away:0},Стас:{home:2,away:1},Дима:{home:2,away:0}} },
-    { id:'r3m2', home:'ЦСКА', away:'Ростов', result:{home:0,away:0}, predictions:{Кирилл:{home:1,away:1},Саша:{home:1,away:1},Стас:{home:2,away:2},Дима:{home:2,away:0}} },
-    { id:'r3m3', home:'Спартак', away:'Краснодар', result:{home:1,away:2}, predictions:{Кирилл:{home:2,away:2},Саша:{home:2,away:3},Стас:{home:1,away:0},Дима:{home:1,away:1}} }
-  ]},
-  { number: 4, matches: [
-    { id:'r4m1', home:'Локомотив', away:'Спартак' },
-    { id:'r4m2', home:'Динамо', away:'ЦСКА' },
-    { id:'r4m3', home:'Краснодар', away:'Зенит' }
-  ]}
-]
+type Drafts = Record<string, Score>
 
-const emptyPredictions = (): Predictions => Object.fromEntries(players.map(p => [p, {}])) as Predictions
+async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    ...init,
+    headers: { ...headers, ...(init?.headers || {}) },
+  })
+  if (!res.ok) throw new Error(await res.text())
+  if (res.status === 204) return undefined as T
+  return res.json()
+}
 
 export default function HomePage() {
   const [tab, setTab] = useState<Tab>('round')
+  const [players, setPlayers] = useState<Player[]>([])
+  const [rounds, setRounds] = useState<Round[]>([])
+  const [matches, setMatches] = useState<Match[]>([])
+  const [predictionRows, setPredictionRows] = useState<PredictionRow[]>([])
   const [roundNumber, setRoundNumber] = useState(4)
-  const [player, setPlayer] = useState<Player>('Кирилл')
-  const [predictions, setPredictions] = useState<Predictions>(emptyPredictions())
-  const [results, setResults] = useState<Results>({})
-  const [admin, setAdmin] = useState(false)
+  const [playerId, setPlayerId] = useState('')
+  const [drafts, setDrafts] = useState<Drafts>({})
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [message, setMessage] = useState('')
+
+  const loadData = useCallback(async () => {
+    try {
+      const [p, r, m, pr] = await Promise.all([
+        api<Player[]>('players?select=id,name,sort_order&order=sort_order.asc'),
+        api<Round[]>('rounds?select=id,round_number,status&order=round_number.asc'),
+        api<Match[]>('matches?select=id,round_id,home_team,away_team,home_score,away_score&order=created_at.asc'),
+        api<PredictionRow[]>('predictions?select=match_id,player_id,home_score,away_score'),
+      ])
+      setPlayers(p); setRounds(r); setMatches(m); setPredictionRows(pr)
+      const current = r.find(x => x.status === 'open') || r[r.length - 1]
+      if (current) setRoundNumber(current.round_number)
+      if (!playerId && p[0]) setPlayerId(p[0].id)
+    } catch (e) {
+      console.error(e)
+      setMessage('Не удалось загрузить данные')
+    } finally {
+      setLoading(false)
+    }
+  }, [playerId])
+
+  useEffect(() => { loadData() }, [loadData])
+
+  const selectedRound = rounds.find(r => r.round_number === roundNumber)
+  const isCurrent = selectedRound?.status === 'open'
+  const roundMatches = matches.filter(m => m.round_id === selectedRound?.id)
+  const selectedPlayer = players.find(p => p.id === playerId)
 
   useEffect(() => {
-    const p = localStorage.getItem('rpl-predictions-v2')
-    const r = localStorage.getItem('rpl-results-v2')
-    if (p) setPredictions(JSON.parse(p))
-    if (r) setResults(JSON.parse(r))
-  }, [])
-  useEffect(() => { localStorage.setItem('rpl-predictions-v2', JSON.stringify(predictions)) }, [predictions])
-  useEffect(() => { localStorage.setItem('rpl-results-v2', JSON.stringify(results)) }, [results])
+    if (!playerId || !isCurrent) return
+    const next: Drafts = {}
+    for (const m of roundMatches) {
+      const row = predictionRows.find(p => p.player_id === playerId && p.match_id === m.id)
+      next[m.id] = row ? { home: row.home_score, away: row.away_score } : { home: 0, away: 0 }
+    }
+    setDrafts(next)
+  }, [playerId, roundNumber, isCurrent, predictionRows, matches])
 
-  const round = rounds.find(r => r.number === roundNumber)!
-  const isCurrent = round.number === 4
-  const getPrediction = (p: Player, match: Match) => isCurrent ? predictions[p][match.id] : match.predictions?.[p]
-  const getResult = (match: Match) => isCurrent ? results[match.id] : match.result
-
-  function setPrediction(matchId:string, side:'home'|'away', value:number) {
-    if (!isCurrent) return
-    setPredictions(prev => ({...prev,[player]:{...prev[player],[matchId]:{home:prev[player][matchId]?.home??0,away:prev[player][matchId]?.away??0,[side]:Math.max(0,value)}}}))
-  }
-  function setResult(matchId:string, side:'home'|'away', value:number) {
-    if (!isCurrent) return
-    setResults(prev => ({...prev,[matchId]:{home:prev[matchId]?.home??0,away:prev[matchId]?.away??0,[side]:Math.max(0,value)}}))
+  const getPrediction = (pid: string, matchId: string): Score | undefined => {
+    if (isCurrent && pid === playerId && drafts[matchId]) return drafts[matchId]
+    const row = predictionRows.find(p => p.player_id === pid && p.match_id === matchId)
+    return row ? { home: row.home_score, away: row.away_score } : undefined
   }
 
-  const standings = useMemo(() => players.map(name => {
-    let points=0, exact=0, outcomes=0, made=0
-    rounds.forEach(r => r.matches.forEach(m => {
-      const pred = r.number===4 ? predictions[name][m.id] : m.predictions?.[name]
-      const actual = r.number===4 ? results[m.id] : m.result
-      if (pred && actual) {
-        made++
-        const pts=calculatePoints(pred,actual)
-        points+=pts
-        if(pts===3) exact++
-        if(pts>=1) outcomes++
-      }
-    }))
-    return {name,points,exact,outcomes,made,average:made?points/made:0}
-  }).sort((a,b)=>b.points-a.points||b.exact-a.exact||b.outcomes-a.outcomes),[predictions,results])
+  const getResult = (m: Match): Score | undefined =>
+    m.home_score === null || m.away_score === null ? undefined : { home: m.home_score, away: m.away_score }
 
-  const leader=standings[0]?.points??0
-  const completedCurrentMatches = round.number===4 ? round.matches.filter(m => results[m.id]).length : 3
+  function changeScore(matchId: string, side: 'home' | 'away', delta: number) {
+    const current = drafts[matchId] || { home: 0, away: 0 }
+    setDrafts(prev => ({ ...prev, [matchId]: { ...current, [side]: Math.max(0, current[side] + delta) } }))
+  }
+
+  async function savePredictions() {
+    if (!isCurrent || !playerId) return
+    setSaving(true); setMessage('')
+    try {
+      const payload = roundMatches.map(m => ({
+        match_id: m.id,
+        player_id: playerId,
+        home_score: drafts[m.id]?.home ?? 0,
+        away_score: drafts[m.id]?.away ?? 0,
+      }))
+      await api('predictions?on_conflict=match_id,player_id', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' },
+        body: JSON.stringify(payload),
+      })
+      setMessage(`✓ Прогнозы ${selectedPlayer?.name} сохранены в общей базе`)
+      const fresh = await api<PredictionRow[]>('predictions?select=match_id,player_id,home_score,away_score')
+      setPredictionRows(fresh)
+    } catch (e) {
+      console.error(e)
+      setMessage('Ошибка сохранения')
+    } finally { setSaving(false) }
+  }
+
+  const standings = useMemo(() => players.map(player => {
+    let points = 0, exact = 0, outcomes = 0, made = 0
+    for (const m of matches) {
+      const actual = getResult(m)
+      if (!actual) continue
+      const row = predictionRows.find(p => p.player_id === player.id && p.match_id === m.id)
+      if (!row) continue
+      made++
+      const pts = calculatePoints({ home: row.home_score, away: row.away_score }, actual)
+      points += pts
+      if (pts === 3) exact++
+      if (pts >= 1) outcomes++
+    }
+    return { ...player, points, exact, outcomes, made, average: made ? points / made : 0 }
+  }).sort((a,b) => b.points-a.points || b.exact-a.exact || b.outcomes-a.outcomes), [players, matches, predictionRows])
+
+  const leader = standings[0]?.points ?? 0
+  const completedMatches = matches.filter(m => getResult(m)).length
+
+  if (loading) return <main><div className="sectionHead"><div><span>Подключаемся к базе</span><h2>РПЛ Predictor</h2></div></div></main>
 
   return <main>
     <header className="hero">
-      <div><div className="eyebrow">⚽ Мини-лига прогнозов</div><h1>РПЛ Predictor</h1><p>Кирилл · Саша · Стас · Дима</p></div>
-      <button className="ghost" onClick={()=>setAdmin(v=>!v)}>{admin?'Закрыть admin':'Admin'}</button>
+      <div><div className="eyebrow">⚽ Мини-лига прогнозов · Supabase live</div><h1>РПЛ Predictor</h1><p>{players.map(p=>p.name).join(' · ')}</p></div>
     </header>
 
     <nav className="tabs">
@@ -99,48 +146,48 @@ export default function HomePage() {
     </nav>
 
     {tab!=='table' && <div className="roundNav">
-      <button className="arrow" onClick={()=>setRoundNumber(n=>Math.max(1,n-1))} disabled={roundNumber===1}>←</button>
-      {[1,2,3,4].map(n=><button key={n} className={roundNumber===n?'active':''} onClick={()=>setRoundNumber(n)}>{n}<span>тур</span></button>)}
-      <button className="arrow" onClick={()=>setRoundNumber(n=>Math.min(4,n+1))} disabled={roundNumber===4}>→</button>
+      <button className="arrow" onClick={()=>setRoundNumber(n=>Math.max(rounds[0]?.round_number||1,n-1))} disabled={roundNumber===rounds[0]?.round_number}>←</button>
+      {rounds.map(r=><button key={r.id} className={roundNumber===r.round_number?'active':''} onClick={()=>setRoundNumber(r.round_number)}>{r.round_number}<span>тур</span></button>)}
+      <button className="arrow" onClick={()=>setRoundNumber(n=>Math.min(rounds[rounds.length-1]?.round_number||n,n+1))} disabled={roundNumber===rounds[rounds.length-1]?.round_number}>→</button>
     </div>}
 
-    {tab==='round' && <section>
-      <div className="sectionHead"><div><span>{isCurrent?'Текущий тур':'Завершённый тур'}</span><h2>Тур {round.number}</h2></div>{!isCurrent&&<div className="locked">✓ завершён</div>}</div>
-      {isCurrent&&<div className="players">{players.map(p=><button key={p} className={player===p?'selected':''} onClick={()=>setPlayer(p)}>{p}</button>)}</div>}
-      <div className="cards">{round.matches.map(match=>{
-        const score=getPrediction(player,match)??{home:0,away:0}
+    {tab==='round' && selectedRound && <section>
+      <div className="sectionHead"><div><span>{isCurrent?'Текущий тур':'Завершённый тур'}</span><h2>Тур {selectedRound.round_number}</h2></div>{!isCurrent&&<div className="locked">✓ завершён</div>}</div>
+      {isCurrent&&<div className="players">{players.map(p=><button key={p.id} className={playerId===p.id?'selected':''} onClick={()=>setPlayerId(p.id)}>{p.name}</button>)}</div>}
+      <div className="cards">{roundMatches.map(match=>{
+        const score=getPrediction(playerId,match.id)??{home:0,away:0}
         const actual=getResult(match)
         return <article className="matchCard" key={match.id}>
-          <div className="teams"><strong>{match.home}</strong><span>—</span><strong>{match.away}</strong></div>
+          <div className="teams"><strong>{match.home_team}</strong><span>—</span><strong>{match.away_team}</strong></div>
           {isCurrent ? <div className="scoreControls">
-            <div className="teamControl"><button onClick={()=>setPrediction(match.id,'home',score.home-1)}>−</button><div className="score">{score.home}</div><button onClick={()=>setPrediction(match.id,'home',score.home+1)}>+</button></div>
+            <div className="teamControl"><button onClick={()=>changeScore(match.id,'home',-1)}>−</button><div className="score">{score.home}</div><button onClick={()=>changeScore(match.id,'home',1)}>+</button></div>
             <span className="colon">:</span>
-            <div className="teamControl"><button onClick={()=>setPrediction(match.id,'away',score.away-1)}>−</button><div className="score">{score.away}</div><button onClick={()=>setPrediction(match.id,'away',score.away+1)}>+</button></div>
+            <div className="teamControl"><button onClick={()=>changeScore(match.id,'away',-1)}>−</button><div className="score">{score.away}</div><button onClick={()=>changeScore(match.id,'away',1)}>+</button></div>
           </div> : <div className="historyScore"><span>{actual?.home}</span><b>:</b><span>{actual?.away}</span></div>}
           {!isCurrent&&<div className="historyHint">Фактический счёт</div>}
-          {admin&&isCurrent&&<div className="adminBox"><span>Факт</span><input type="number" min="0" value={actual?.home??0} onChange={e=>setResult(match.id,'home',Number(e.target.value))}/><b>:</b><input type="number" min="0" value={actual?.away??0} onChange={e=>setResult(match.id,'away',Number(e.target.value))}/></div>}
         </article>
       })}</div>
-      {isCurrent&&<button className="primary" onClick={()=>alert(`Прогнозы ${player} сохранены`)}>Сохранить прогнозы</button>}
+      {isCurrent&&<button className="primary" disabled={saving} onClick={savePredictions}>{saving?'Сохраняем…':`Сохранить прогнозы · ${selectedPlayer?.name||''}`}</button>}
+      {message&&<div className="historyHint" style={{marginTop:10}}>{message}</div>}
     </section>}
 
-    {tab==='predictions'&&<section>
-      <div className="sectionHead"><div><span>{isCurrent?'Текущий тур':'Завершённый тур'}</span><h2>Прогнозы · Тур {round.number}</h2></div></div>
-      <div className="matrix">{round.matches.map(match=>{
+    {tab==='predictions'&&selectedRound&&<section>
+      <div className="sectionHead"><div><span>{isCurrent?'Текущий тур':'Завершённый тур'}</span><h2>Прогнозы · Тур {selectedRound.round_number}</h2></div></div>
+      <div className="matrix">{roundMatches.map(match=>{
         const actual=getResult(match)
         return <div className="matrixBlock" key={match.id}>
-          <h3>{match.home} — {match.away}{actual&&<em>{actual.home}:{actual.away}</em>}</h3>
-          {players.map(p=>{const pred=getPrediction(p,match);const pts=pred&&actual?calculatePoints(pred,actual):null;return <div className="matrixRow" key={p}><span>{p}</span><strong>{pred?`${pred.home}:${pred.away}`:'—'}</strong><i className={pts===3?'p3':pts===1?'p1':'p0'}>{pts===null?'':`+${pts}`}</i></div>})}
+          <h3>{match.home_team} — {match.away_team}{actual&&<em>{actual.home}:{actual.away}</em>}</h3>
+          {players.map(p=>{const pred=getPrediction(p.id,match.id);const pts=pred&&actual?calculatePoints(pred,actual):null;return <div className="matrixRow" key={p.id}><span>{p.name}</span><strong>{pred?`${pred.home}:${pred.away}`:'—'}</strong><i className={pts===3?'p3':pts===1?'p1':'p0'}>{pts===null?'':`+${pts}`}</i></div>})}
         </div>})}</div>
     </section>}
 
     {tab==='table'&&<section>
-      <div className="sectionHead"><div><span>{completedCurrentMatches?`3 тура + ${completedCurrentMatches} матч(а) 4-го тура`:'После 3 завершённых туров'}</span><h2>Общий зачёт</h2></div></div>
+      <div className="sectionHead"><div><span>{completedMatches} завершённых матчей</span><h2>Общий зачёт</h2></div></div>
       <div className="standings">
         <div className="tr head"><span>#</span><span>Участник</span><span>Очки</span><span>Точные</span><span>Исходы</span><span>Отст.</span></div>
-        {standings.map((s,i)=><div className="tr" key={s.name}><span>{i+1}</span><strong>{s.name}</strong><b>{s.points}</b><span>{s.exact}</span><span>{s.outcomes}</span><span>{leader-s.points}</span></div>)}
+        {standings.map((s,i)=><div className="tr" key={s.id}><span>{i+1}</span><strong>{s.name}</strong><b>{s.points}</b><span>{s.exact}</span><span>{s.outcomes}</span><span>{leader-s.points}</span></div>)}
       </div>
-      <div className="summaryCards">{standings.map(s=><div className="summaryCard" key={s.name}><strong>{s.name}</strong><span>{s.made} прогнозов</span><b>{s.average.toFixed(2)} очка / прогноз</b></div>)}</div>
+      <div className="summaryCards">{standings.map(s=><div className="summaryCard" key={s.id}><strong>{s.name}</strong><span>{s.made} прогнозов</span><b>{s.average.toFixed(2)} очка / прогноз</b></div>)}</div>
     </section>}
   </main>
 }
