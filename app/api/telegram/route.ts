@@ -12,6 +12,8 @@ type Match = { id: string; round_id: string; home_team: string; away_team: strin
 type Prediction = { match_id: string; player_id: string; home_score: number; away_score: number }
 
 const dbHeaders = { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` }
+function normalizeSecret(value: string) { return value.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 256) }
+
 async function db<T>(path: string): Promise<T> {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, { headers: dbHeaders, cache: 'no-store' })
   if (!res.ok) throw new Error(await res.text())
@@ -65,7 +67,8 @@ export async function GET(){ return NextResponse.json({ok:true,bot:'fantasy_rpl_
 
 export async function POST(req:NextRequest){
   try{
-    const secret=process.env.TELEGRAM_WEBHOOK_SECRET
+    const rawSecret=process.env.TELEGRAM_WEBHOOK_SECRET
+    const secret=rawSecret ? normalizeSecret(rawSecret) : ''
     if(secret && req.headers.get('x-telegram-bot-api-secret-token')!==secret) return new NextResponse('Unauthorized',{status:401})
     const update:TgUpdate=await req.json()
     const msg=update.message
