@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { calculatePoints, Score } from '@/lib/scoring'
+import { calculatePoints, Score } from '../lib/scoring'
 
 const players = ['Кирилл', 'Саша', 'Стас', 'Дима'] as const
 const matches = [
