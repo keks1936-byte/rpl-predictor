@@ -12,7 +12,6 @@ type Player = { id: string; name: string; sort_order: number }
 type Round = { id: string; round_number: number; status: 'upcoming' | 'open' | 'locked' | 'finished' }
 type Match = { id: string; round_id: string; home_team: string; away_team: string; home_score: number | null; away_score: number | null }
 type PredictionRow = { match_id: string; player_id: string; home_score: number; away_score: number }
-
 type Drafts = Record<string, Score>
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -20,9 +19,10 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     headers: { ...headers, ...(init?.headers || {}) },
   })
-  if (!res.ok) throw new Error(await res.text())
-  if (res.status === 204) return undefined as T
-  return res.json()
+  const text = await res.text()
+  if (!res.ok) throw new Error(text || `HTTP ${res.status}`)
+  if (!text) return undefined as T
+  return JSON.parse(text) as T
 }
 
 export default function HomePage() {
@@ -104,9 +104,9 @@ export default function HomePage() {
         headers: { 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' },
         body: JSON.stringify(payload),
       })
-      setMessage(`✓ Прогнозы ${selectedPlayer?.name} сохранены в общей базе`)
       const fresh = await api<PredictionRow[]>('predictions?select=match_id,player_id,home_score,away_score')
       setPredictionRows(fresh)
+      setMessage(`✓ Прогнозы ${selectedPlayer?.name} сохранены в общей базе`)
     } catch (e) {
       console.error(e)
       setMessage('Ошибка сохранения')
