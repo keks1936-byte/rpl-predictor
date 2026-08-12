@@ -2,13 +2,14 @@ import { NextRequest, NextResponse } from 'next/server'
 
 const SUPABASE_URL = 'https://imjzkiwgkvrxafqweeei.supabase.co'
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImltanpraXdna3ZyeGFmcXdlZWVpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODY1NTY4MTQsImV4cCI6MjEwMjEzMjgxNH0.Iii9aQqBAMBAk7ru5rD0VDpLXro6ZERSoBZgL0t2gbQ'
+const BOT_USERNAME = 'fantasy_rpl_bot'
 
 type TgUser = { id: number; username?: string }
-type TgMessage = { message_id: number; chat: { id: number }; from?: TgUser; text?: string }
+type TgMessage = { message_id: number; chat: { id: number; type?: string }; from?: TgUser; text?: string }
 type TgCallback = { id: string; from: TgUser; data?: string; message?: TgMessage }
 type TgUpdate = { message?: TgMessage; callback_query?: TgCallback }
 type Player = { id: string; name: string; sort_order: number; telegram_user_id: number|null; telegram_username?: string|null; is_admin: boolean }
-type Round = { id: string; round_number: number; status: string }
+type Round = { id: string; round_number: number; status: string; predictions_revealed?: boolean }
 type Match = { id: string; round_id: string; home_team: string; away_team: string; home_score: number|null; away_score: number|null }
 type Prediction = { match_id: string; player_id: string; home_score: number; away_score: number }
 type BotSession = { telegram_user_id: number; flow: string; step: string; data: Record<string, any> }
@@ -40,7 +41,6 @@ function botToken(){
   if(!token) throw new Error('TELEGRAM_BOT_TOKEN is missing')
   return token
 }
-
 async function tg(method:string,payload:Record<string,unknown>){
   const res=await fetch(`https://api.telegram.org/bot${botToken()}/${method}`,{
     method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)
@@ -48,7 +48,6 @@ async function tg(method:string,payload:Record<string,unknown>){
   if(!res.ok) throw new Error(await res.text())
   return res.json()
 }
-
 async function send(chatId:number,text:string, extra:Record<string,unknown>={}) {
   return tg('sendMessage',{chat_id:chatId,text,parse_mode:'HTML',...extra})
 }
@@ -67,7 +66,7 @@ async function getBoundPlayer(tgId:number){
   return players[0]
 }
 async function getOpenRound(){
-  const rounds=await db<Round[]>('rounds?select=id,round_number,status&status=eq.open&order=round_number.asc&limit=1')
+  const rounds=await db<Round[]>('rounds?select=id,round_number,status,predictions_revealed&status=eq.open&order=round_number.asc&limit=1')
   return rounds[0]
 }
 async function getRoundMatches(roundId:string){
@@ -89,7 +88,6 @@ async function bindPlayer(playerId:string,user:TgUser){
     body:JSON.stringify({p_player_id:playerId,p_telegram_user_id:user.id,p_telegram_username:user.username||null})
   })
 }
-
 async function getSession(tgId:number){
   const rows=await db<BotSession[]>(`bot_sessions?select=telegram_user_id,flow,step,data&telegram_user_id=eq.${tgId}&limit=1`)
   return rows[0]
@@ -131,7 +129,41 @@ async function roundText(){
   const round=await getOpenRound()
   if(!round) return 'Сейчас нет открытого тура.'
   const matches=await getRoundMatches(round.id)
-  return [`⚽ <b>Тур ${round.round_number}</b>`,'',...matches.map((m,i)=>`${i+1}. ${m.home_team} — ${m.away_team}`),'','/predict — сделать прогноз прямо здесь'].join('\n')
+  return [`⚽ <b>Тур ${round.round_number}</b>`,'',...matches.map((m,i)=>`${i+1}. ${m.home_team} — ${m.away_team}`),'','/predict — сделать прогноз в личке с ботом','/status — кто уже сдал'].join('\n')
+}
+
+async function statusText(){
+  const round=await getOpenRound()
+  if(!round) return 'Сейчас нет открытого тура.'
+  const [players,matches,preds]=await Promise.all([
+    getPlayers(),
+    getRoundMatches(round.id),
+    db<Prediction[]>('predictions?select=match_id,player_id,home_score,away_score')
+  ])
+  const ids=new Set(matches.map(m=>m.id))
+  const lines=players.map(p=>{
+    const count=preds.filter(x=>x.player_id===p.id&&ids.has(x.match_id)).length
+    return `${count===matches.length?'✅':'⏳'} <b>${p.name}</b> — ${count}/${matches.length}`
+  })
+  return [`📋 <b>Тур ${round.round_number} · прогнозы</b>`,'',...lines,'',round.predictions_revealed?'🔓 Прогнозы раскрыты':'🔒 Счета скрыты до раскрытия'].join('\n')
+}
+
+async function predictionsText(){
+  const round=await getOpenRound()
+  if(!round) return 'Сейчас нет открытого тура.'
+  if(!round.predictions_revealed) return '🔒 Прогнозы пока скрыты. После дедлайна администратор раскроет их командой /reveal.'
+  const [players,matches,preds]=await Promise.all([
+    getPlayers(),getRoundMatches(round.id),db<Prediction[]>('predictions?select=match_id,player_id,home_score,away_score')
+  ])
+  const blocks:string[]=[`🔓 <b>Прогнозы · Тур ${round.round_number}</b>`]
+  for(const m of matches){
+    blocks.push('',`⚽ <b>${m.home_team} — ${m.away_team}</b>`)
+    for(const p of players){
+      const pr=preds.find(x=>x.player_id===p.id&&x.match_id===m.id)
+      blocks.push(`${p.name}: <b>${pr?`${pr.home_score}:${pr.away_score}`:'—'}</b>`)
+    }
+  }
+  return blocks.join('\n')
 }
 
 async function showBind(chatId:number){
@@ -146,6 +178,7 @@ async function showBind(chatId:number){
 async function predictionView(player:Player,index:number){
   const round=await getOpenRound()
   if(!round) return {text:'Сейчас нет открытого тура.',markup:{inline_keyboard:[] as unknown[]}}
+  if(round.predictions_revealed) return {text:'🔒 Приём прогнозов на этот тур завершён.',markup:{inline_keyboard:[] as unknown[]}}
   const matches=await getRoundMatches(round.id)
   if(index<0) index=0
   if(index>=matches.length) index=matches.length-1
@@ -164,15 +197,26 @@ async function predictionView(player:Player,index:number){
   return {text:`🔮 <b>Тур ${round.round_number} · ${player.name}</b>\n\nМатч ${index+1} из ${matches.length}\n<b>${match.home_team} — ${match.away_team}</b>\n\nТекущий прогноз: <b>${home}:${away}</b>`,markup:{inline_keyboard:rows}}
 }
 
+async function ensureAllPredictions(player:Player){
+  const round=await getOpenRound(); if(!round||round.predictions_revealed) return
+  const matches=await getRoundMatches(round.id)
+  for(const m of matches){
+    const p=await getPrediction(player.id,m.id)
+    if(!p) await upsertPrediction(player.id,m.id,0,0)
+  }
+}
+
 async function summaryText(player:Player){
   const round=await getOpenRound(); if(!round) return 'Сейчас нет открытого тура.'
   const matches=await getRoundMatches(round.id); const lines=[]
   for(const m of matches){ const p=await getPrediction(player.id,m.id); lines.push(`${m.home_team} — ${m.away_team}: <b>${p?.home_score??0}:${p?.away_score??0}</b>`) }
-  return [`✅ <b>${player.name}, прогнозы на Тур ${round.round_number} сохранены</b>`,'',...lines,'','До дедлайна их можно изменить через /predict.'].join('\n')
+  return [`✅ <b>${player.name}, прогнозы на Тур ${round.round_number} сохранены</b>`,'',...lines,'','До раскрытия их можно изменить через /predict.'].join('\n')
 }
 async function handlePredict(chatId:number,user:TgUser){
   const player=await getBoundPlayer(user.id)
   if(!player){ await showBind(chatId); return }
+  const round=await getOpenRound()
+  if(round?.predictions_revealed){ await send(chatId,'🔒 Приём прогнозов на этот тур уже завершён.'); return }
   const view=await predictionView(player,0); await send(chatId,view.text,{reply_markup:view.markup})
 }
 
@@ -183,7 +227,6 @@ async function startNewRound(chatId:number,user:TgUser){
   await setSession(user.id,'newround','home_1',{round_number:next,matches:[]})
   await send(chatId,`🛠 <b>Создаём Тур ${next}</b>\n\nМатч 1 из 3. Введи название <b>хозяев</b>:`)
 }
-
 async function handleNewRoundText(chatId:number,user:TgUser,text:string,session:BotSession){
   const data=session.data||{}; const matches:Array<{home:string;away:string}>=data.matches||[]
   const m=session.step.match(/^(home|away)_(\d)$/); if(!m) return false
@@ -200,7 +243,6 @@ async function handleNewRoundText(chatId:number,user:TgUser,text:string,session:
     reply_markup:{inline_keyboard:[[{text:'✅ Сохранить тур',callback_data:'admin:save_round'}],[{text:'❌ Отмена',callback_data:'admin:cancel'}]]}
   }); return true
 }
-
 async function saveUpcomingRound(user:TgUser){
   const session=await getSession(user.id); if(!session||session.flow!=='newround'||session.step!=='confirm') throw new Error('No round draft')
   const data=session.data; const league=await db<{id:string}[]>('leagues?select=id&order=created_at.asc&limit=1')
@@ -215,10 +257,9 @@ async function saveUpcomingRound(user:TgUser){
   })
   await clearSession(user.id); return round
 }
-
 async function openRound(roundId:string){
   await db('rounds?status=eq.open',{method:'PATCH',headers:{'Content-Type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({status:'locked'})})
-  await db(`rounds?id=eq.${roundId}`,{method:'PATCH',headers:{'Content-Type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({status:'open'})})
+  await db(`rounds?id=eq.${roundId}`,{method:'PATCH',headers:{'Content-Type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({status:'open',predictions_revealed:false})})
 }
 
 async function startResultFlow(chatId:number,user:TgUser){
@@ -233,7 +274,6 @@ async function startResultFlow(chatId:number,user:TgUser){
   if(!keyboard.length){ await send(chatId,'Все результаты уже внесены.'); return }
   await send(chatId,'🧾 <b>Какой матч завершился?</b>',{reply_markup:{inline_keyboard:keyboard}})
 }
-
 async function handleResultText(chatId:number,user:TgUser,text:string,session:BotSession){
   if(session.flow!=='result'||session.step!=='score') return false
   const m=text.trim().match(/^(\d+)\s*[:\-]\s*(\d+)$/)
@@ -246,6 +286,15 @@ async function handleResultText(chatId:number,user:TgUser,text:string,session:Bo
   await clearSession(user.id)
   await send(chatId,`✅ Результат сохранён: <b>${match.home_team} ${home}:${away} ${match.away_team}</b>\n\n/table — посмотреть обновлённый зачёт`)
   return true
+}
+
+async function requestReveal(chatId:number,user:TgUser){
+  if(!await requireAdmin(user.id)){ await send(chatId,'⛔ Эта команда доступна только администратору лиги.'); return }
+  const round=await getOpenRound(); if(!round){ await send(chatId,'Нет открытого тура.'); return }
+  if(round.predictions_revealed){ await send(chatId,'Прогнозы этого тура уже раскрыты.'); return }
+  await send(chatId,`⚠️ <b>Раскрыть прогнозы Тура ${round.round_number}?</b>\n\nПосле этого участники больше не смогут менять счета.`,{
+    reply_markup:{inline_keyboard:[[{text:'🔓 Да, раскрыть',callback_data:`admin:reveal:${round.id}`}],[{text:'Отмена',callback_data:'noop'}]]}
+  })
 }
 
 async function handleCallback(q:TgCallback){
@@ -277,22 +326,33 @@ async function handleCallback(q:TgCallback){
     await setSession(q.from.id,'result','score',{match_id:matchId}); await answerCallback(q.id)
     await edit(msg.chat.id,msg.message_id,`🧾 <b>${match.home_team} — ${match.away_team}</b>\n\nПришли фактический счёт сообщением, например: <b>2:1</b>`); return
   }
+  if(data.startsWith('admin:reveal:')){
+    if(!await requireAdmin(q.from.id)){ await answerCallback(q.id,'Нет доступа'); return }
+    const roundId=data.slice('admin:reveal:'.length)
+    await db(`rounds?id=eq.${roundId}`,{method:'PATCH',headers:{'Content-Type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({predictions_revealed:true})})
+    await answerCallback(q.id,'Прогнозы раскрыты')
+    await edit(msg.chat.id,msg.message_id,await predictionsText()); return
+  }
 
   const player=await getBoundPlayer(q.from.id)
-  if(!player){ await answerCallback(q.id,'Сначала используй /predict и выбери своё имя'); return }
+  if(!player){ await answerCallback(q.id,'Сначала открой /predict в личке и выбери своё имя'); return }
   if(data.startsWith('sc:')){
     const [,idxRaw,side,dir]=data.split(':'); const index=Number(idxRaw); const round=await getOpenRound(); if(!round){await answerCallback(q.id,'Тур закрыт');return}
+    if(round.predictions_revealed){await answerCallback(q.id,'Приём прогнозов завершён');return}
     const matches=await getRoundMatches(round.id), match=matches[index]; if(!match){await answerCallback(q.id);return}
     const current=await getPrediction(player.id,match.id); let home=current?.home_score??0,away=current?.away_score??0; const delta=dir==='+'?1:-1
     if(side==='h')home=Math.max(0,home+delta);else away=Math.max(0,away+delta)
     await upsertPrediction(player.id,match.id,home,away); const view=await predictionView(player,index); await answerCallback(q.id); await edit(msg.chat.id,msg.message_id,view.text,{reply_markup:view.markup}); return
   }
   if(data.startsWith('go:')){ const view=await predictionView(player,Number(data.slice(3))); await answerCallback(q.id); await edit(msg.chat.id,msg.message_id,view.text,{reply_markup:view.markup}); return }
-  if(data==='done'){ await answerCallback(q.id,'Прогнозы сохранены'); await edit(msg.chat.id,msg.message_id,await summaryText(player),{reply_markup:{inline_keyboard:[[{text:'✏️ Изменить',callback_data:'go:0'}]]}}); return }
+  if(data==='done'){
+    const round=await getOpenRound(); if(round?.predictions_revealed){await answerCallback(q.id,'Приём прогнозов завершён');return}
+    await ensureAllPredictions(player); await answerCallback(q.id,'Прогнозы сохранены'); await edit(msg.chat.id,msg.message_id,await summaryText(player),{reply_markup:{inline_keyboard:[[{text:'✏️ Изменить',callback_data:'go:0'}]]}}); return
+  }
   await answerCallback(q.id)
 }
 
-export async function GET(){ return NextResponse.json({ok:true,bot:'fantasy_rpl_bot',mode:'telegram-native-admin'}) }
+export async function GET(){ return NextResponse.json({ok:true,bot:BOT_USERNAME,mode:'private-predictions'}) }
 
 export async function POST(req:NextRequest){
   try{
@@ -301,15 +361,29 @@ export async function POST(req:NextRequest){
     const update:TgUpdate=await req.json()
     if(update.callback_query){ await handleCallback(update.callback_query); return NextResponse.json({ok:true}) }
     const msg=update.message; if(!msg?.text) return NextResponse.json({ok:true})
-    const command=msg.text.trim().split(/\s+/)[0].split('@')[0].toLowerCase()
+    const parts=msg.text.trim().split(/\s+/)
+    const command=parts[0].split('@')[0].toLowerCase()
+    const arg=parts[1]?.toLowerCase()
+    const isPrivate=msg.chat.type==='private'||msg.chat.type===undefined
+
     if(command==='/start'||command==='/help'){
+      if(command==='/start'&&arg==='predict'&&msg.from&&isPrivate){ await handlePredict(msg.chat.id,msg.from); return NextResponse.json({ok:true}) }
       const admin=msg.from?await requireAdmin(msg.from.id):undefined
-      await send(msg.chat.id,'⚽ <b>РПЛ Predictor</b>\n\n/table — общий зачёт\n/round — матчи текущего тура\n/predict — сделать или изменить прогноз'+(admin?'\n\n🛠 <b>Админ</b>\n/newround — выбрать 3 матча следующего тура\n/result — внести фактический счёт':'')+'\n\nТочный счёт = 3 очка, правильный исход = 1.')
+      await send(msg.chat.id,'⚽ <b>РПЛ Predictor</b>\n\n/table — общий зачёт\n/round — матчи текущего тура\n/status — кто уже сдал прогнозы\n/predictions — посмотреть счета после раскрытия\n/predict — сделать или изменить прогноз'+(admin?'\n\n🛠 <b>Админ</b>\n/newround — выбрать 3 матча следующего тура\n/result — внести фактический счёт\n/reveal — закрыть приём и раскрыть прогнозы':'')+'\n\nТочный счёт = 3 очка, правильный исход = 1.')
     } else if(command==='/table') await send(msg.chat.id,await tableText())
     else if(command==='/round') await send(msg.chat.id,await roundText())
-    else if(command==='/predict'&&msg.from) await handlePredict(msg.chat.id,msg.from)
+    else if(command==='/status') await send(msg.chat.id,await statusText())
+    else if(command==='/predictions') await send(msg.chat.id,await predictionsText())
+    else if(command==='/predict'&&msg.from){
+      if(!isPrivate){
+        await send(msg.chat.id,'🔒 <b>Прогнозы делаются в личке с ботом</b>\n\nВ общем чате никто не увидит твои счета до раскрытия.',{
+          reply_markup:{inline_keyboard:[[{text:'🔮 Сделать прогноз в личке',url:`https://t.me/${BOT_USERNAME}?start=predict`}]]}
+        })
+      } else await handlePredict(msg.chat.id,msg.from)
+    }
     else if(command==='/newround'&&msg.from) await startNewRound(msg.chat.id,msg.from)
     else if(command==='/result'&&msg.from) await startResultFlow(msg.chat.id,msg.from)
+    else if(command==='/reveal'&&msg.from) await requestReveal(msg.chat.id,msg.from)
     else if(msg.from){
       const session=await getSession(msg.from.id)
       if(session?.flow==='newround'&&await handleNewRoundText(msg.chat.id,msg.from,msg.text,session)) return NextResponse.json({ok:true})
