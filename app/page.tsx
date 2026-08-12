@@ -17,11 +17,13 @@ type Drafts=Record<string,Score>
 const logoByTeam:Record<string,string>={
   'локомотив':'https://logotyp.us/file/lokomotiv-moscow.svg',
   'локомотив москва':'https://logotyp.us/file/lokomotiv-moscow.svg',
+  'локо':'https://logotyp.us/file/lokomotiv-moscow.svg',
   'зенит':'https://logotyp.us/file/zenit.svg',
   'спартак':'https://logotyp.us/file/spartak-moscow.svg',
   'спартак москва':'https://logotyp.us/file/spartak-moscow.svg',
   'динамо':'https://logotyp.us/file/dynamo.svg',
   'динамо москва':'https://logotyp.us/file/dynamo.svg',
+  'динамо м':'https://logotyp.us/file/dynamo.svg',
   'оренбург':'https://logotyp.us/file/orenburg.svg',
   'краснодар':'https://logotyp.us/file/krasnodar.svg',
   'рубин':'https://logotyp.us/file/rubin-kazan.svg',
@@ -30,9 +32,23 @@ const logoByTeam:Record<string,string>={
   'цска москва':'https://logotyp.us/file/cska-moscow.svg',
   'ростов':'https://logotyp.us/file/rostov.svg',
   'балтика':'https://assets.football-logos.cc/logos/russia/1500x1500/baltika.b4c4f0b4.png',
+  'ахмат':'https://logotyp.us/file/akhmat-grozny.svg',
+  'ахмат грозный':'https://logotyp.us/file/akhmat-grozny.svg',
+  'крылья советов':'https://logotyp.us/file/krylya-sovetov.svg',
+  'крылья':'https://logotyp.us/file/krylya-sovetov.svg',
+  'крылья советов самара':'https://logotyp.us/file/krylya-sovetov.svg',
+  'акрон':'https://logotyp.us/file/akron-tolyatti.svg',
+  'акрон тольятти':'https://logotyp.us/file/akron-tolyatti.svg',
+  'факел':'https://logotyp.us/file/fakel-voronezh.svg',
+  'факел воронеж':'https://logotyp.us/file/fakel-voronezh.svg',
+  'динамо махачкала':'https://logotyp.us/file/dynamo-makhachkala.svg',
+  'динамо мх':'https://logotyp.us/file/dynamo-makhachkala.svg',
+  'динамо (махачкала)':'https://logotyp.us/file/dynamo-makhachkala.svg',
+  'родина':'https://logotyp.us/file/rodina-moscow.svg',
+  'родина москва':'https://logotyp.us/file/rodina-moscow.svg',
 }
-function teamKey(name:string){return name.toLowerCase().replace(/ё/g,'е').trim()}
-function initials(name:string){return name.split(/\s+/).map(x=>x[0]).join('').slice(0,2).toUpperCase()}
+function teamKey(name:string){return name.toLowerCase().replace(/ё/g,'е').replace(/\s+/g,' ').trim()}
+function initials(name:string){return name.replace(/[()]/g,'').split(/\s+/).filter(Boolean).map(x=>x[0]).join('').slice(0,2).toUpperCase()}
 function TeamBadge({name,size='normal'}:{name:string;size?:'small'|'normal'}){
   const src=logoByTeam[teamKey(name)]
   const [failed,setFailed]=useState(false)
