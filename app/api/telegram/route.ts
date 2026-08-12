@@ -13,6 +13,7 @@ type Round = { id:string; round_number:number; status:string; predictions_reveal
 type Match = { id:string; round_id:string; home_team:string; away_team:string; home_score:number|null; away_score:number|null }
 type Prediction = { match_id:string; player_id:string; home_score:number; away_score:number }
 type BotSession = { telegram_user_id:number; flow:string; step:string; data:Record<string,any> }
+type Standing = { player:Player; total:number; exact:number; correct:number; forecasts:number }
 
 const dbHeaders = { apikey:SUPABASE_ANON_KEY, Authorization:`Bearer ${SUPABASE_ANON_KEY}` }
 const isPrivate = (m:TgMessage) => m.chat.type === 'private'
@@ -73,26 +74,44 @@ function pts(p:Prediction,m:Match){
   if(p.home_score===m.home_score&&p.away_score===m.away_score) return 3
   return outcome(p.home_score,p.away_score)===outcome(m.home_score,m.away_score)?1:0
 }
+function outcomeLabel(value:number,m:Match){ return value>0?`победу ${m.home_team}`:value<0?`победу ${m.away_team}`:'ничью' }
+function consensusLine(m:Match,ps:Player[],prs:Prediction[]){
+  const picks=ps.map(p=>({p,pr:prs.find(x=>x.player_id===p.id&&x.match_id===m.id)})).filter((x):x is {p:Player;pr:Prediction}=>Boolean(x.pr))
+  if(picks.length<2) return ''
+  const groups=new Map<number,typeof picks>()
+  for(const pick of picks){const k=outcome(pick.pr.home_score,pick.pr.away_score);groups.set(k,[...(groups.get(k)||[]),pick])}
+  const ranked=[...groups.entries()].sort((a,b)=>b[1].length-a[1].length)
+  const [topOutcome,topPicks]=ranked[0]
+  if(topPicks.length===picks.length) return `📊 Все ${picks.length}/${picks.length} ждут ${outcomeLabel(topOutcome,m)}.`
+  const uniqueTop=ranked.length===1||topPicks.length>(ranked[1]?.[1].length||0)
+  const base=uniqueTop&&topPicks.length>=2?`📊 ${topPicks.length}/${picks.length} ждут ${outcomeLabel(topOutcome,m)}.`:''
+  if(topPicks.length===picks.length-1&&ranked.length===2&&ranked[1][1].length===1){
+    const outsider=ranked[1][1][0]
+    const outsiderOutcome=outcome(outsider.pr.home_score,outsider.pr.away_score)
+    return `${base}${base?' ':''}🧍 ${outsider.p.name} единственный ставит на ${outcomeLabel(outsiderOutcome,m)}.`
+  }
+  return base
+}
 
-async function standingsRows(){
-  const [ps,ms,prs]=await Promise.all([
-    players(),
-    db<Match[]>('matches?select=id,round_id,home_team,away_team,home_score,away_score'),
-    db<Prediction[]>('predictions?select=match_id,player_id,home_score,away_score')
-  ])
+function calculateStandings(ps:Player[],ms:Match[],prs:Prediction[],excludeRoundId?:string):Standing[]{
   return ps.map(p=>{
     let total=0,exact=0,correct=0,forecasts=0
     for(const m of ms){
+      if(excludeRoundId&&m.round_id===excludeRoundId) continue
       if(m.home_score===null||m.away_score===null) continue
       const pr=prs.find(x=>x.player_id===p.id&&x.match_id===m.id)
       if(!pr) continue
       forecasts++
-      const n=pts(pr,m); total+=n
+      const n=pts(pr,m);total+=n
       if(n===3) exact++
       if(n>0) correct++
     }
     return {player:p,total,exact,correct,forecasts}
   }).sort((a,b)=>b.total-a.total||b.exact-a.exact||a.player.sort_order-b.player.sort_order)
+}
+async function standingsRows(){
+  const [ps,ms,prs]=await Promise.all([players(),db<Match[]>('matches?select=id,round_id,home_team,away_team,home_score,away_score'),db<Prediction[]>('predictions?select=match_id,player_id,home_score,away_score')])
+  return calculateStandings(ps,ms,prs)
 }
 async function tableText(){
   const rows=await standingsRows()
@@ -119,76 +138,63 @@ async function predictionsText(){
   const [ps,ms,prs]=await Promise.all([players(),roundMatches(r.id),db<Prediction[]>('predictions?select=match_id,player_id,home_score,away_score')])
   const out=[`🔓 <b>Прогнозы · Тур ${r.round_number}</b>`]
   for(const m of ms){
-    out.push('',`⚽ <b>${m.home_team} — ${m.away_team}</b>`)
-    for(const p of ps){ const pr=prs.find(x=>x.player_id===p.id&&x.match_id===m.id); out.push(`${p.name}: <b>${pr?`${pr.home_score}:${pr.away_score}`:'—'}</b>`) }
+    const forecastLine=ps.map(p=>{const pr=prs.find(x=>x.player_id===p.id&&x.match_id===m.id);return `${p.name} <b>${pr?`${pr.home_score}:${pr.away_score}`:'—'}</b>`}).join(' · ')
+    out.push('',`⚽ <b>${m.home_team} — ${m.away_team}</b>`,forecastLine)
+    const consensus=consensusLine(m,ps,prs);if(consensus)out.push(consensus)
   }
   return out.join('\n')
 }
 async function statsText(p:Player){
-  const [rounds,allMatches,prs]=await Promise.all([
-    db<Round[]>('rounds?select=id,round_number,status,predictions_revealed,deadline_at,summary_sent_at&order=round_number.asc'),
-    db<Match[]>('matches?select=id,round_id,home_team,away_team,home_score,away_score'),
-    db<Prediction[]>('predictions?select=match_id,player_id,home_score,away_score')
-  ])
+  const [rounds,allMatches,prs]=await Promise.all([db<Round[]>('rounds?select=id,round_number,status,predictions_revealed,deadline_at,summary_sent_at&order=round_number.asc'),db<Match[]>('matches?select=id,round_id,home_team,away_team,home_score,away_score'),db<Prediction[]>('predictions?select=match_id,player_id,home_score,away_score')])
   let total=0,exact=0,correct=0,forecasts=0,wins=0
   const ps=await players()
-  for(const m of allMatches){
-    if(m.home_score===null||m.away_score===null) continue
-    const pr=prs.find(x=>x.player_id===p.id&&x.match_id===m.id); if(!pr) continue
-    forecasts++; const n=pts(pr,m); total+=n; if(n===3) exact++; if(n>0) correct++
-  }
+  for(const m of allMatches){if(m.home_score===null||m.away_score===null)continue;const pr=prs.find(x=>x.player_id===p.id&&x.match_id===m.id);if(!pr)continue;forecasts++;const n=pts(pr,m);total+=n;if(n===3)exact++;if(n>0)correct++}
   for(const r of rounds.filter(x=>x.status==='finished')){
-    const ms=allMatches.filter(m=>m.round_id===r.id&&m.home_score!==null&&m.away_score!==null)
-    if(!ms.length) continue
+    const ms=allMatches.filter(m=>m.round_id===r.id&&m.home_score!==null&&m.away_score!==null);if(!ms.length)continue
     const scores=ps.map(pl=>({id:pl.id,score:ms.reduce((s,m)=>{const pr=prs.find(x=>x.player_id===pl.id&&x.match_id===m.id);return s+(pr?pts(pr,m):0)},0)}))
-    const best=Math.max(...scores.map(x=>x.score))
-    if(scores.find(x=>x.id===p.id)?.score===best) wins++
+    const best=Math.max(...scores.map(x=>x.score));if(scores.find(x=>x.id===p.id)?.score===best)wins++
   }
   const avg=forecasts?total/forecasts:0
   return [`📊 <b>${p.name} · статистика</b>`,'',`Очки: <b>${total}</b>`,`🎯 Точных счетов: <b>${exact}</b>`,`✅ Угаданных исходов: <b>${correct}</b>`,`🥇 Побед в турах: <b>${wins}</b>`,`Прогнозов: ${forecasts}`,`Среднее: <b>${avg.toFixed(2)}</b> очка / прогноз`].join('\n')
 }
 async function roundSummaryText(roundId:string){
   const r=(await db<Round[]>(`rounds?select=id,round_number,status,predictions_revealed,deadline_at,summary_sent_at&id=eq.${roundId}&limit=1`))[0]
-  const [ps,ms,prs]=await Promise.all([players(),roundMatches(roundId),db<Prediction[]>('predictions?select=match_id,player_id,home_score,away_score')])
-  const rows=ps.map(p=>{
-    let score=0,exact=0
-    for(const m of ms){const pr=prs.find(x=>x.player_id===p.id&&x.match_id===m.id);if(!pr)continue;const n=pts(pr,m);score+=n;if(n===3)exact++}
-    return {p,score,exact}
-  }).sort((a,b)=>b.score-a.score||b.exact-a.exact||a.p.sort_order-b.p.sort_order)
+  const [ps,ms,prs,allMatches]=await Promise.all([players(),roundMatches(roundId),db<Prediction[]>('predictions?select=match_id,player_id,home_score,away_score'),db<Match[]>('matches?select=id,round_id,home_team,away_team,home_score,away_score')])
+  const rows=ps.map(p=>{let score=0,exact=0;for(const m of ms){const pr=prs.find(x=>x.player_id===p.id&&x.match_id===m.id);if(!pr)continue;const n=pts(pr,m);score+=n;if(n===3)exact++}return{p,score,exact}}).sort((a,b)=>b.score-a.score||b.exact-a.exact||a.p.sort_order-b.p.sort_order)
   const best=rows[0]?.score??0
   const winners=rows.filter(x=>x.score===best).map(x=>x.p.name)
-  const overall=await standingsRows()
+  const overall=calculateStandings(ps,allMatches,prs)
+  const previous=calculateStandings(ps,allMatches,prs,roundId)
+  const prevPositions=new Map(previous.map((x,i)=>[x.player.id,i+1]))
+  const hadPreviousResults=allMatches.some(m=>m.round_id!==roundId&&m.home_score!==null&&m.away_score!==null)
+  const movement=(playerId:string,newPos:number)=>{
+    if(!hadPreviousResults)return'→'
+    const oldPos=prevPositions.get(playerId)??newPos
+    if(oldPos>newPos)return`↑${oldPos-newPos}`
+    if(oldPos<newPos)return`↓${newPos-oldPos}`
+    return'→'
+  }
   const resultLines=ms.map(m=>`⚽ ${m.home_team} <b>${m.home_score}:${m.away_score}</b> ${m.away_team}`)
-  return [`🏁 <b>Тур ${r.round_number} завершён</b>`,'',...resultLines,'',`${winners.length>1?'🤝 Победители тура':'🥇 Победитель тура'}: <b>${winners.join(' · ')}</b> — ${best} очк.`,'',...rows.map((x,i)=>`${i+1}. ${x.p.name} — <b>+${x.score}</b>${x.exact?` · 🎯${x.exact}`:''}`),'','🏆 <b>Общий зачёт</b>',...overall.map((x,i)=>`${i+1}. ${x.player.name} — <b>${x.total}</b>`)].join('\n')
+  return [`🏁 <b>Тур ${r.round_number} завершён</b>`,'',...resultLines,'',`${winners.length>1?'🤝 Победители тура':'🥇 Победитель тура'}: <b>${winners.join(' · ')}</b> — ${best} очк.`,'',...rows.map((x,i)=>`${i+1}. ${x.p.name} — <b>+${x.score}</b>${x.exact?` · 🎯${x.exact}`:''}`),'','🏆 <b>Общий зачёт</b>',...overall.map((x,i)=>`${i+1}. ${movement(x.player.id,i+1)} <b>${x.player.name}</b> — ${x.total}`)].join('\n')
 }
 async function publishRoundSummary(roundId:string,currentChat:number){
   const r=(await db<Round[]>(`rounds?select=id,round_number,status,predictions_revealed,deadline_at,summary_sent_at&id=eq.${roundId}&limit=1`))[0]
-  if(r?.summary_sent_at) return
-  const text=await roundSummaryText(roundId)
-  const group=await primaryGroupChat()
-  if(group && group!==currentChat){ try{await send(group,text)}catch{} }
+  if(r?.summary_sent_at)return
+  const text=await roundSummaryText(roundId),group=await primaryGroupChat()
+  if(group&&group!==currentChat){try{await send(group,text)}catch{}}
   await send(currentChat,text)
   await db(`rounds?id=eq.${roundId}`,{method:'PATCH',headers:{'Content-Type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({summary_sent_at:new Date().toISOString()})})
 }
 
-async function bindPrompt(chatId:number){
-  const ps=(await players()).filter(p=>!p.telegram_user_id)
-  if(!ps.length){await send(chatId,'Все участники уже привязаны.');return}
-  await send(chatId,'👤 <b>Кто ты?</b>\nВыбери один раз:',{reply_markup:{inline_keyboard:ps.map(p=>[{text:p.name,callback_data:`bind:${p.id}`}])}})
-}
+async function bindPrompt(chatId:number){const ps=(await players()).filter(p=>!p.telegram_user_id);if(!ps.length){await send(chatId,'Все участники уже привязаны.');return}await send(chatId,'👤 <b>Кто ты?</b>\nВыбери один раз:',{reply_markup:{inline_keyboard:ps.map(p=>[{text:p.name,callback_data:`bind:${p.id}`}])}})}
 async function bindPlayer(id:string,u:TgUser){await db('rpc/bind_telegram_player',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({p_player_id:id,p_telegram_user_id:u.id,p_telegram_username:u.username||null})})}
-
 async function predictionView(p:Player,index:number){
-  const r=await openRound(); if(!r) return {text:'Сейчас нет открытого тура.',markup:{inline_keyboard:[]}}
-  if(r.predictions_revealed||(r.deadline_at&&new Date(r.deadline_at)<=new Date())) return {text:'🔒 Приём прогнозов завершён.',markup:{inline_keyboard:[]}}
-  const ms=await roundMatches(r.id); index=Math.max(0,Math.min(index,ms.length-1))
-  const m=ms[index],pr=await prediction(p.id,m.id),h=pr?.home_score??0,a=pr?.away_score??0
-  const rows:any[]=[
-    [{text:'−',callback_data:`sc:${index}:h:-`},{text:`${m.home_team}: ${h}`,callback_data:'noop'},{text:'+',callback_data:`sc:${index}:h:+`}],
-    [{text:'−',callback_data:`sc:${index}:a:-`},{text:`${m.away_team}: ${a}`,callback_data:'noop'},{text:'+',callback_data:`sc:${index}:a:+`}]
-  ]
-  const nav:any[]=[]; if(index>0)nav.push({text:'← Назад',callback_data:`go:${index-1}`}); if(index<ms.length-1)nav.push({text:'Далее →',callback_data:`go:${index+1}`}); else nav.push({text:'✅ Готово',callback_data:'done'}); rows.push(nav)
-  return {text:`🔮 <b>Тур ${r.round_number} · ${p.name}</b>\n⏰ ${deadlineText(r.deadline_at)}\n\nМатч ${index+1} из ${ms.length}\n<b>${m.home_team} — ${m.away_team}</b>\n\nТекущий прогноз: <b>${h}:${a}</b>`,markup:{inline_keyboard:rows}}
+  const r=await openRound();if(!r)return{text:'Сейчас нет открытого тура.',markup:{inline_keyboard:[]}}
+  if(r.predictions_revealed||(r.deadline_at&&new Date(r.deadline_at)<=new Date()))return{text:'🔒 Приём прогнозов завершён.',markup:{inline_keyboard:[]}}
+  const ms=await roundMatches(r.id);index=Math.max(0,Math.min(index,ms.length-1));const m=ms[index],pr=await prediction(p.id,m.id),h=pr?.home_score??0,a=pr?.away_score??0
+  const rows:any[]=[[{text:'−',callback_data:`sc:${index}:h:-`},{text:`${m.home_team}: ${h}`,callback_data:'noop'},{text:'+',callback_data:`sc:${index}:h:+`}],[{text:'−',callback_data:`sc:${index}:a:-`},{text:`${m.away_team}: ${a}`,callback_data:'noop'},{text:'+',callback_data:`sc:${index}:a:+`}]],nav:any[]=[]
+  if(index>0)nav.push({text:'← Назад',callback_data:`go:${index-1}`});if(index<ms.length-1)nav.push({text:'Далее →',callback_data:`go:${index+1}`});else nav.push({text:'✅ Готово',callback_data:'done'});rows.push(nav)
+  return{text:`🔮 <b>Тур ${r.round_number} · ${p.name}</b>\n⏰ ${deadlineText(r.deadline_at)}\n\nМатч ${index+1} из ${ms.length}\n<b>${m.home_team} — ${m.away_team}</b>\n\nТекущий прогноз: <b>${h}:${a}</b>`,markup:{inline_keyboard:rows}}
 }
 async function ensureAll(p:Player){const r=await openRound();if(!r||r.predictions_revealed)return;for(const m of await roundMatches(r.id)){if(!await prediction(p.id,m.id))await upsertPrediction(p.id,m.id,0,0)}}
 async function summary(p:Player){const r=await openRound();if(!r)return'Нет открытого тура.';const lines=[];for(const m of await roundMatches(r.id)){const pr=await prediction(p.id,m.id);lines.push(`${m.home_team} — ${m.away_team}: <b>${pr?.home_score??0}:${pr?.away_score??0}</b>`)}return[`✅ <b>${p.name}, прогнозы на Тур ${r.round_number} сохранены</b>`,'',...lines,'',`⏰ Изменения до ${deadlineText(r.deadline_at)}`].join('\n')}
@@ -197,14 +203,8 @@ async function handlePredict(chatId:number,u:TgUser){const p=await playerByTg(u.
 async function startNewRound(chatId:number,u:TgUser){if(!await admin(u.id)){await send(chatId,'⛔ Только для администратора.');return}const rs=await db<Round[]>('rounds?select=id,round_number,status&order=round_number.desc&limit=1'),n=(rs[0]?.round_number||0)+1;await setSession(u.id,'newround','home_1',{round_number:n,matches:[]});await send(chatId,`🛠 <b>Создаём Тур ${n}</b>\n\nМатч 1 из 3. Введи <b>хозяев</b>:`)}
 async function handleNewRoundText(chatId:number,u:TgUser,text:string,s:BotSession){
   const d=s.data||{},ms:Array<{home:string;away:string}>=d.matches||[]
-  if(s.step==='deadline'){
-    const deadline=parseMoscowDeadline(text)
-    if(!deadline||new Date(deadline)<=new Date()){await send(chatId,'Не понял дату или она уже прошла. Пришли в формате <b>15.08 17:00</b> (московское время).');return true}
-    d.deadline_at=deadline; await setSession(u.id,'newround','confirm',d)
-    await send(chatId,[`📋 <b>Тур ${d.round_number}</b>`,'',...ms.map((x,j)=>`${j+1}. ${x.home} — ${x.away}`),'',`⏰ Дедлайн: <b>${deadlineText(deadline)}</b>`].join('\n'),{reply_markup:{inline_keyboard:[[{text:'✅ Сохранить тур',callback_data:'admin:save_round'}],[{text:'❌ Отмена',callback_data:'admin:cancel'}]]}});return true
-  }
-  const mm=s.step.match(/^(home|away)_(\d)$/); if(!mm)return false
-  const side=mm[1],i=Number(mm[2])
+  if(s.step==='deadline'){const deadline=parseMoscowDeadline(text);if(!deadline||new Date(deadline)<=new Date()){await send(chatId,'Не понял дату или она уже прошла. Пришли в формате <b>15.08 17:00</b> (московское время).');return true}d.deadline_at=deadline;await setSession(u.id,'newround','confirm',d);await send(chatId,[`📋 <b>Тур ${d.round_number}</b>`,'',...ms.map((x,j)=>`${j+1}. ${x.home} — ${x.away}`),'',`⏰ Дедлайн: <b>${deadlineText(deadline)}</b>`].join('\n'),{reply_markup:{inline_keyboard:[[{text:'✅ Сохранить тур',callback_data:'admin:save_round'}],[{text:'❌ Отмена',callback_data:'admin:cancel'}]]}});return true}
+  const mm=s.step.match(/^(home|away)_(\d)$/);if(!mm)return false;const side=mm[1],i=Number(mm[2])
   if(side==='home'){d.pending_home=text.trim();await setSession(u.id,'newround',`away_${i}`,d);await send(chatId,`Матч ${i}: <b>${text.trim()}</b> — ?\nТеперь гости:`);return true}
   const home=String(d.pending_home||'').trim();ms.push({home,away:text.trim()});d.matches=ms;delete d.pending_home
   if(i<3){await setSession(u.id,'newround',`home_${i+1}`,d);await send(chatId,`✅ ${home} — ${text.trim()}\n\nМатч ${i+1} из 3. Хозяева:`);return true}
@@ -215,19 +215,7 @@ async function notifyPlayers(r:Round){const[ps,ms]=await Promise.all([players(),
 async function activateRound(id:string){await db('rounds?status=eq.open',{method:'PATCH',headers:{'Content-Type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({status:'locked'})});await db(`rounds?id=eq.${id}`,{method:'PATCH',headers:{'Content-Type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({status:'open',predictions_revealed:false})});const r=(await db<Round[]>(`rounds?select=id,round_number,status,predictions_revealed,deadline_at,summary_sent_at&id=eq.${id}&limit=1`))[0],delivery=await notifyPlayers(r);return{r,delivery}}
 
 async function startResult(chatId:number,u:TgUser){if(!await admin(u.id)){await send(chatId,'⛔ Только для администратора.');return}const rs=await db<Round[]>('rounds?select=id,round_number,status&status=in.(open,locked)&order=round_number.desc'),kb:any[]=[];for(const r of rs){for(const m of(await roundMatches(r.id)).filter(x=>x.home_score===null))kb.push([{text:`Т${r.round_number}: ${m.home_team} — ${m.away_team}`,callback_data:`admin:result:${m.id}`}])}await send(chatId,kb.length?'🧾 <b>Какой матч завершился?</b>':'Все результаты уже внесены.',kb.length?{reply_markup:{inline_keyboard:kb}}:{})}
-async function handleResultText(chatId:number,u:TgUser,text:string,s:BotSession){
-  if(s.flow!=='result'||s.step!=='score')return false
-  const mm=text.trim().match(/^(\d+)\s*[:\-]\s*(\d+)$/);if(!mm){await send(chatId,'Пришли счёт в формате <b>2:1</b>.');return true}
-  const h=Number(mm[1]),a=Number(mm[2]),id=String(s.data.match_id)
-  await db(`matches?id=eq.${id}`,{method:'PATCH',headers:{'Content-Type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({home_score:h,away_score:a})})
-  const m=(await db<Match[]>(`matches?select=id,round_id,home_team,away_team,home_score,away_score&id=eq.${id}&limit=1`))[0],all=await roundMatches(m.round_id)
-  const finished=all.every(x=>x.home_score!==null&&x.away_score!==null)
-  if(finished)await db(`rounds?id=eq.${m.round_id}`,{method:'PATCH',headers:{'Content-Type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({status:'finished'})})
-  await clearSession(u.id)
-  await send(chatId,`✅ ${m.home_team} <b>${h}:${a}</b> ${m.away_team}`)
-  if(finished) await publishRoundSummary(m.round_id,chatId)
-  return true
-}
+async function handleResultText(chatId:number,u:TgUser,text:string,s:BotSession){if(s.flow!=='result'||s.step!=='score')return false;const mm=text.trim().match(/^(\d+)\s*[:\-]\s*(\d+)$/);if(!mm){await send(chatId,'Пришли счёт в формате <b>2:1</b>.');return true}const h=Number(mm[1]),a=Number(mm[2]),id=String(s.data.match_id);await db(`matches?id=eq.${id}`,{method:'PATCH',headers:{'Content-Type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({home_score:h,away_score:a})});const m=(await db<Match[]>(`matches?select=id,round_id,home_team,away_team,home_score,away_score&id=eq.${id}&limit=1`))[0],all=await roundMatches(m.round_id);const finished=all.every(x=>x.home_score!==null&&x.away_score!==null);if(finished)await db(`rounds?id=eq.${m.round_id}`,{method:'PATCH',headers:{'Content-Type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({status:'finished'})});await clearSession(u.id);await send(chatId,`✅ ${m.home_team} <b>${h}:${a}</b> ${m.away_team}`);if(finished)await publishRoundSummary(m.round_id,chatId);return true}
 
 async function handleCallback(q:TgCallback){
   const d=q.data||'',m=q.message;if(!m){await answer(q.id);return}
@@ -246,7 +234,7 @@ async function handleCallback(q:TgCallback){
   await answer(q.id)
 }
 
-export async function GET(){return NextResponse.json({ok:true,bot:BOT_USERNAME,mode:'stats-and-summaries'})}
+export async function GET(){return NextResponse.json({ok:true,bot:BOT_USERNAME,mode:'consensus-and-movement'})}
 export async function POST(req:NextRequest){
   try{
     const raw=process.env.TELEGRAM_WEBHOOK_SECRET,s=raw?normalizeSecret(raw):''
@@ -256,12 +244,7 @@ export async function POST(req:NextRequest){
     const m=u.message;if(!m?.text)return NextResponse.json({ok:true})
     await rememberGroupChat(m)
     const parts=m.text.trim().split(/\s+/),cmd=parts[0].split('@')[0].toLowerCase()
-    if((cmd==='/start'||cmd==='/help')&&m.from){
-      if(isPrivate(m)&&parts[1]==='predict'){await handlePredict(m.chat.id,m.from);return NextResponse.json({ok:true})}
-      const a=await admin(m.from.id)
-      await send(m.chat.id,'⚽ <b>РПЛ Predictor</b>\n\n/table — зачёт\n/round — матчи тура\n/status — статус тура\n/stats — моя статистика\n/predict — прогноз'+(a?'\n\n🛠 /newround · /result · /reveal':''))
-      return NextResponse.json({ok:true})
-    }
+    if((cmd==='/start'||cmd==='/help')&&m.from){if(isPrivate(m)&&parts[1]==='predict'){await handlePredict(m.chat.id,m.from);return NextResponse.json({ok:true})}const a=await admin(m.from.id);await send(m.chat.id,'⚽ <b>РПЛ Predictor</b>\n\n/table — зачёт\n/round — матчи тура\n/status — статус тура\n/stats — моя статистика\n/predict — прогноз'+(a?'\n\n🛠 /newround · /result · /reveal':''));return NextResponse.json({ok:true})}
     if(cmd==='/table')await send(m.chat.id,await tableText())
     else if(cmd==='/round')await send(m.chat.id,await roundText())
     else if(cmd==='/status')await send(m.chat.id,await statusText(Boolean(m.from&&await admin(m.from.id))),{reply_markup:{inline_keyboard:[[{text:'🔄 Обновить',callback_data:'status:refresh'}]]}})
