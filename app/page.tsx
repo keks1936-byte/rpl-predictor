@@ -5,7 +5,7 @@ import { calculatePoints, Score } from '../lib/scoring'
 import './analytics.css'
 
 const SUPABASE_URL='https://imjzkiwgkvrxafqweeei.supabase.co'
-const SUPABASE_ANON_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXAiLCJyZWYiOiJpbWp6a2l3Z2t2cnhhZnF3ZWVlaSIsInJvbGUiOiJhbm9uIiwiaWF0IjoxNzg2NTU2ODE0LCJleHAiOjIxMDIxMzI4MTR9.Iii9aQqBAMBAk7ru5rD0VDpLXro6ZERSoBZgL0t2gbQ'
+const SUPABASE_ANON_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImltanpraXdna3ZyeGFmcXdlZWVpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODY1NTY4MTQsImV4cCI6MjEwMjEzMjgxNH0.Iii9aQqBAMBAk7ru5rD0VDpLXro6ZERSoBZgL0t2gbQ'
 const headers={apikey:SUPABASE_ANON_KEY,Authorization:`Bearer ${SUPABASE_ANON_KEY}`}
 
 type Tab='round'|'predictions'|'table'|'analytics'
@@ -74,52 +74,15 @@ export default function HomePage(){
     const finishedMatches=matches.filter(m=>finishedIds.has(m.round_id)&&score(m))
     const predictionMap=new Map(predictionRows.map(p=>[`${p.player_id}:${p.match_id}`,p]))
     const roundById=new Map(rounds.map(r=>[r.id,r.round_number]))
-
     const consensus=new Map<string,Set<Outcome>>()
-    for(const m of finishedMatches){
-      const counts:Record<Outcome,number>={H:0,D:0,A:0}
-      for(const p of players){const pr=predictionMap.get(`${p.id}:${m.id}`);if(pr)counts[outcome({home:pr.home_score,away:pr.away_score})]++}
-      const max=Math.max(counts.H,counts.D,counts.A)
-      consensus.set(m.id,new Set((['H','D','A'] as Outcome[]).filter(x=>counts[x]===max)))
-    }
-
-    const profiles=players.map(player=>{
-      let points=0,exact=0,correct=0,mae=0,total=0,p1=0,draws=0,p2=0,against=0,made=0
-      for(const m of finishedMatches){
-        const actual=score(m),pr=predictionMap.get(`${player.id}:${m.id}`);if(!actual||!pr)continue
-        const pred={home:pr.home_score,away:pr.away_score};made++
-        const pts=calculatePoints(pred,actual);points+=pts;if(pts===3)exact++;if(pts>0)correct++
-        mae+=Math.abs(pred.home-actual.home)+Math.abs(pred.away-actual.away);total+=pred.home+pred.away
-        const o=outcome(pred);if(o==='H')p1++;else if(o==='D')draws++;else p2++
-        const top=consensus.get(m.id);if(top&&!top.has(o))against++
-      }
-      return{...player,made,points,exact,correct,mae:made?mae/made:0,avgTotal:made?total/made:0,p1,draws,p2,against}
-    })
-
-    const teamBias=players.flatMap(player=>{
-      const teams=new Map<string,{games:number,pred:number,actual:number}>()
-      for(const m of finishedMatches){
-        const actual=score(m),pr=predictionMap.get(`${player.id}:${m.id}`);if(!actual||!pr)continue
-        const pred={home:pr.home_score,away:pr.away_score}
-        for(const side of ['home','away'] as const){const team=side==='home'?m.home_team:m.away_team;const cur=teams.get(team)||{games:0,pred:0,actual:0};cur.games++;cur.pred+=pointsForSide(pred,side);cur.actual+=pointsForSide(actual,side);teams.set(team,cur)}
-      }
-      return Array.from(teams.entries()).map(([team,x])=>({playerId:player.id,name:player.name,team,games:x.games,predPpg:x.pred/x.games,actualPpg:x.actual/x.games,bias:(x.pred-x.actual)/x.games}))
-    })
-
-    const uniqueExact=finishedMatches.flatMap(m=>{
-      const actual=score(m);if(!actual)return []
-      const exacts=players.flatMap(p=>{const pr=predictionMap.get(`${p.id}:${m.id}`);return pr&&pr.home_score===actual.home&&pr.away_score===actual.away?[p]:[]})
-      if(exacts.length!==1)return []
-      return [{round:roundById.get(m.round_id)||0,match:`${m.home_team} — ${m.away_team}`,score:`${actual.home}:${actual.away}`,name:exacts[0].name}]
-    }).sort((a,b)=>b.round-a.round)
-
+    for(const m of finishedMatches){const counts:Record<Outcome,number>={H:0,D:0,A:0};for(const p of players){const pr=predictionMap.get(`${p.id}:${m.id}`);if(pr)counts[outcome({home:pr.home_score,away:pr.away_score})]++}const max=Math.max(counts.H,counts.D,counts.A);consensus.set(m.id,new Set((['H','D','A'] as Outcome[]).filter(x=>counts[x]===max)))}
+    const profiles=players.map(player=>{let points=0,exact=0,correct=0,mae=0,total=0,p1=0,draws=0,p2=0,against=0,made=0;for(const m of finishedMatches){const actual=score(m),pr=predictionMap.get(`${player.id}:${m.id}`);if(!actual||!pr)continue;const pred={home:pr.home_score,away:pr.away_score};made++;const pts=calculatePoints(pred,actual);points+=pts;if(pts===3)exact++;if(pts>0)correct++;mae+=Math.abs(pred.home-actual.home)+Math.abs(pred.away-actual.away);total+=pred.home+pred.away;const o=outcome(pred);if(o==='H')p1++;else if(o==='D')draws++;else p2++;const top=consensus.get(m.id);if(top&&!top.has(o))against++}return{...player,made,points,exact,correct,mae:made?mae/made:0,avgTotal:made?total/made:0,p1,draws,p2,against}})
+    const teamBias=players.flatMap(player=>{const teams=new Map<string,{games:number,pred:number,actual:number}>();for(const m of finishedMatches){const actual=score(m),pr=predictionMap.get(`${player.id}:${m.id}`);if(!actual||!pr)continue;const pred={home:pr.home_score,away:pr.away_score};for(const side of ['home','away'] as const){const team=side==='home'?m.home_team:m.away_team;const cur=teams.get(team)||{games:0,pred:0,actual:0};cur.games++;cur.pred+=pointsForSide(pred,side);cur.actual+=pointsForSide(actual,side);teams.set(team,cur)}}return Array.from(teams.entries()).map(([team,x])=>({playerId:player.id,name:player.name,team,games:x.games,predPpg:x.pred/x.games,actualPpg:x.actual/x.games,bias:(x.pred-x.actual)/x.games}))})
+    const uniqueExact=finishedMatches.flatMap(m=>{const actual=score(m);if(!actual)return [];const exacts=players.flatMap(p=>{const pr=predictionMap.get(`${p.id}:${m.id}`);return pr&&pr.home_score===actual.home&&pr.away_score===actual.away?[p]:[]});if(exacts.length!==1)return [];return [{round:roundById.get(m.round_id)||0,match:`${m.home_team} — ${m.away_team}`,score:`${actual.home}:${actual.away}`,name:exacts[0].name}]}).sort((a,b)=>b.round-a.round)
     const maxBy=(key:(p:(typeof profiles)[number])=>number)=>{const max=Math.max(...profiles.map(key));return profiles.filter(p=>key(p)===max)}
     const minBy=(key:(p:(typeof profiles)[number])=>number)=>{const min=Math.min(...profiles.map(key));return profiles.filter(p=>key(p)===min)}
     const bestMae=minBy(p=>p.mae),mvp=maxBy(p=>p.points),sniper=maxBy(p=>p.exact),misterX=maxBy(p=>p.draws),away=maxBy(p=>p.p2),over=maxBy(p=>p.avgTotal),contrarian=maxBy(p=>p.against)
-    const loco=teamBias.filter(x=>teamKey(x.team).includes('локомотив')).sort((a,b)=>b.predPpg-a.predPpg)
-    const spartak=teamBias.filter(x=>teamKey(x.team).includes('спартак')).sort((a,b)=>a.predPpg-b.predPpg)
-    const biggestBias=teamBias.filter(x=>x.games>=2).sort((a,b)=>Math.abs(b.bias)-Math.abs(a.bias)).slice(0,6)
-    const actualGoals=finishedMatches.reduce((s,m)=>s+(m.home_score||0)+(m.away_score||0),0)
+    const loco=teamBias.filter(x=>teamKey(x.team).includes('локомотив')).sort((a,b)=>b.predPpg-a.predPpg),spartak=teamBias.filter(x=>teamKey(x.team).includes('спартак')).sort((a,b)=>a.predPpg-b.predPpg),biggestBias=teamBias.filter(x=>x.games>=2).sort((a,b)=>Math.abs(b.bias)-Math.abs(a.bias)).slice(0,6),actualGoals=finishedMatches.reduce((s,m)=>s+(m.home_score||0)+(m.away_score||0),0)
     return{finishedMatches,profiles,uniqueExact,biggestBias,actualGoals,awards:{mvp,sniper,bestMae,misterX,away,over,contrarian,locoFan:loco[0],spartakHater:spartak[0]}}
   },[players,rounds,matches,predictionRows])
 
@@ -129,41 +92,10 @@ export default function HomePage(){
     <header className="hero"><div><div className="eyebrow">⚽ Мини-лига прогнозов · Supabase live</div><h1>РПЛ Predictor</h1><p>{players.map(p=>p.name).join(' · ')}</p></div></header>
     <nav className="tabs"><button className={tab==='round'?'active':''} onClick={()=>setTab('round')}>Тур</button><button className={tab==='predictions'?'active':''} onClick={()=>setTab('predictions')}>Прогнозы</button><button className={tab==='table'?'active':''} onClick={()=>setTab('table')}>Таблица</button><button className={tab==='analytics'?'active':''} onClick={()=>setTab('analytics')}>Аналитика</button></nav>
     {(tab==='round'||tab==='predictions')&&<div className="roundNav"><button className="arrow" onClick={()=>setRoundNumber(n=>Math.max(rounds[0]?.round_number||1,n-1))} disabled={roundNumber===rounds[0]?.round_number}>←</button>{rounds.map(r=><button key={r.id} className={roundNumber===r.round_number?'active':''} onClick={()=>setRoundNumber(r.round_number)}>{r.round_number}<span>тур</span></button>)}<button className="arrow" onClick={()=>setRoundNumber(n=>Math.min(rounds[rounds.length-1]?.round_number||n,n+1))} disabled={roundNumber===rounds[rounds.length-1]?.round_number}>→</button></div>}
-
     {tab==='round'&&selectedRound&&<section><div className="sectionHead"><div><span>{isCurrent?'Текущий тур':'Завершённый тур'}</span><h2>Тур {selectedRound.round_number}</h2></div>{!isCurrent&&<div className="locked">✓ завершён</div>}</div>{isCurrent&&!revealed&&<div className="privacyNotice"><strong>🔒 Прогнозы принимаются только в личке с ботом</strong><span>До дедлайна чужие счета на сайте не показываются.</span></div>}<div className="cards">{roundMatches.map(match=>{const actual=score(match);return <article className="matchCard" key={match.id}><div className="teams"><TeamName name={match.home_team} side="home"/><span>—</span><TeamName name={match.away_team} side="away"/></div>{actual?<><div className="historyScore"><span>{actual.home}</span><b>:</b><span>{actual.away}</span></div><div className="historyHint">Фактический счёт</div></>:<div className="fixtureHint">Матч тура</div>}</article>})}</div></section>}
-
     {tab==='predictions'&&selectedRound&&<section><div className="sectionHead"><div><span>{isCurrent&&!revealed?'Скрыты до дедлайна':'Прогнозы раскрыты'}</span><h2>Прогнозы · Тур {selectedRound.round_number}</h2></div></div>{isCurrent&&!revealed?<><div className="privacyNotice"><strong>🔐 Счета скрыты</strong><span>Видно только, кто уже отправил все прогнозы.</span></div><div className="submissionGrid">{players.map(p=>{const n=submissionCount(p.id),done=n===roundMatches.length&&roundMatches.length>0;return <div className={`submissionCard ${done?'done':''}`} key={p.id}><strong>{done?'✅':'⏳'} {p.name}</strong><span>{n}/{roundMatches.length}</span></div>})}</div></>:<div className="matrix">{roundMatches.map(match=>{const actual=score(match);return <div className="matrixBlock" key={match.id}><h3><span className="matrixTeams"><TeamBadge name={match.home_team} size="small"/>{match.home_team}<span>—</span><TeamBadge name={match.away_team} size="small"/>{match.away_team}</span>{actual&&<em>{actual.home}:{actual.away}</em>}</h3>{players.map(p=>{const pred=getPrediction(p.id,match.id),n=pred&&actual?calculatePoints(pred,actual):null;return <div className="matrixRow" key={p.id}><span>{p.name}</span><strong>{pred?`${pred.home}:${pred.away}`:'—'}</strong><i className={n===3?'p3':n===1?'p1':'p0'}>{n===null?'':`+${n}`}</i></div>})}</div>})}</div>}</section>}
-
     {tab==='table'&&<section><div className="sectionHead"><div><span>{completedMatches} завершённых матчей</span><h2>Общий зачёт</h2></div></div><div className="standings"><div className="tr head"><span>#</span><span>Участник</span><span>Очки</span><span>Точные</span><span>Исходы</span><span>Отст.</span></div>{standings.map((s,i)=><div className="tr" key={s.id}><span>{i+1}</span><strong>{s.name}</strong><b>{s.points}</b><span>{s.exact}</span><span>{s.outcomes}</span><span>{leader-s.points}</span></div>)}</div><div className="summaryCards">{standings.map(s=><div className="summaryCard" key={s.id}><strong>{s.name}</strong><span>{s.made} прогнозов</span><b>{s.average.toFixed(2)} очка / прогноз</b></div>)}</div><div className="sectionHead awardsHead"><div><h2>🏅 Статистика лиги</h2></div></div><div className="awardsGrid"><div className="awardCard heroAward"><span>🏆 Герой последнего тура</span><strong>{leagueStats.latest?leagueStats.latest.heroes.map(x=>x.name).join(' · '):'Пока нет'}</strong><p>{leagueStats.latest?`Тур ${leagueStats.latest.round} · ${leagueStats.latest.top} очк.`:'Появится после завершения тура'}</p></div><div className="awardCard"><span>🎯 Снайпер</span><strong>{leagueStats.snipers.length?leagueStats.snipers.map(x=>x.name).join(' · '):'—'}</strong><p>{leagueStats.maxExact?`${leagueStats.maxExact} точных счетов`:'Точных счетов пока нет'}</p></div><div className="awardCard"><span>🔥 Рекордная серия</span><strong>{leagueStats.streakKings.length?leagueStats.streakKings.map(x=>x.name).join(' · '):'—'}</strong><p>{leagueStats.maxBest?`${leagueStats.maxBest} матчей подряд с очками`:'Серия ещё не началась'}</p></div><div className="awardCard"><span>👑 Чемпион туров</span><strong>{leagueStats.roundKings.length?leagueStats.roundKings.map(x=>x.name).join(' · '):'—'}</strong><p>{leagueStats.maxWins?`${leagueStats.maxWins} побед в турах`:'Ждём первый завершённый тур'}</p></div></div></section>}
-
-    {tab==='analytics'&&<section className="analyticsSection">
-      <div className="sectionHead"><div><span>{analytics.finishedMatches.length} матчей в выборке</span><h2>Глубокая аналитика</h2></div><div className="locked">автообновление</div></div>
-      <div className="analyticsLead">Кто играет осторожно, кто идёт против толпы и какие команды каждый из вас системно переоценивает. Метрики считаются только по завершённым турам.</div>
-      <div className="analyticsKpis">
-        <div><span>⚽ Фактический тотал</span><strong>{analytics.finishedMatches.length?(analytics.actualGoals/analytics.finishedMatches.length).toFixed(2):'—'}</strong><small>гола за матч</small></div>
-        <div><span>👑 Лидер</span><strong>{joinNames(analytics.awards.mvp)}</strong><small>{analytics.awards.mvp[0]?.points||0} очк.</small></div>
-        <div><span>🎯 Снайпер</span><strong>{joinNames(analytics.awards.sniper)}</strong><small>{analytics.awards.sniper[0]?.exact||0} точных</small></div>
-        <div><span>🧮 Лучший MAE</span><strong>{joinNames(analytics.awards.bestMae)}</strong><small>{analytics.awards.bestMae[0]?.mae.toFixed(2)||'—'} гола</small></div>
-      </div>
-
-      <div className="sectionHead analyticsSub"><div><span>Стиль прогнозирования</span><h2>Почерк игроков</h2></div></div>
-      <div className="profileGrid">{analytics.profiles.map(p=><article className="profileCard" key={p.id}><div className="profileTop"><strong>{p.name}</strong><b>{p.points} очк.</b></div><div className="profileOutcomes"><span>П1 <b>{p.p1}</b></span><span>Х <b>{p.draws}</b></span><span>П2 <b>{p.p2}</b></span></div><div className="profileStats"><span>MAE <b>{p.mae.toFixed(2)}</b></span><span>Тотал <b>{p.avgTotal.toFixed(2)}</b></span><span>Против толпы <b>{p.against}</b></span></div></article>)}</div>
-
-      <div className="sectionHead analyticsSub"><div><span>Номинации</span><h2>Психотипы</h2></div></div>
-      <div className="awardsGrid analyticsAwards">
-        <div className="awardCard"><span>🤝 Мистер Х</span><strong>{joinNames(analytics.awards.misterX)}</strong><p>{analytics.awards.misterX[0]?.draws||0} ничьих в прогнозах</p></div>
-        <div className="awardCard"><span>✈️ Away Ultras</span><strong>{joinNames(analytics.awards.away)}</strong><p>{analytics.awards.away[0]?.p2||0} побед гостей</p></div>
-        <div className="awardCard"><span>🔥 Overman</span><strong>{joinNames(analytics.awards.over)}</strong><p>{analytics.awards.over[0]?.avgTotal.toFixed(2)||'—'} ожидаемого гола</p></div>
-        <div className="awardCard"><span>🐴 Contrarian</span><strong>{joinNames(analytics.awards.contrarian)}</strong><p>{analytics.awards.contrarian[0]?.against||0} раз против консенсуса</p></div>
-        <div className="awardCard"><span>🚂 Главный оптимист по Локо</span><strong>{analytics.awards.locoFan?.name||'—'}</strong><p>{analytics.awards.locoFan?`${analytics.awards.locoFan.predPpg.toFixed(2)} ожидаемого очка / матч`:'—'}</p></div>
-        <div className="awardCard"><span>🐷 Главный пессимист по Спартаку</span><strong>{analytics.awards.spartakHater?.name||'—'}</strong><p>{analytics.awards.spartakHater?`${analytics.awards.spartakHater.predPpg.toFixed(2)} ожидаемого очка / матч`:'—'}</p></div>
-      </div>
-
-      <div className="analyticsTwoCol">
-        <div><div className="sectionHead analyticsSub"><div><span>Редкие попадания</span><h2>Уникальные точные</h2></div></div><div className="insightList">{analytics.uniqueExact.length?analytics.uniqueExact.slice(0,6).map((x,i)=><div className="insightRow" key={`${x.round}-${x.match}-${i}`}><span>Тур {x.round}</span><strong>{x.name}</strong><p>{x.match} · {x.score}</p></div>):<div className="emptyAnalytics">Пока нет уникальных точных счетов</div>}</div></div>
-        <div><div className="sectionHead analyticsSub"><div><span>Клубные ожидания</span><h2>Самые сильные bias</h2></div></div><div className="insightList">{analytics.biggestBias.map((x,i)=><div className="insightRow" key={`${x.playerId}-${x.team}-${i}`}><span>{x.bias>0?'переоценка':'недооценка'} {x.bias>0?'+':''}{x.bias.toFixed(2)} PPG</span><strong>{x.name} · {x.team}</strong><p>ожидал {x.predPpg.toFixed(2)} · факт {x.actualPpg.toFixed(2)}</p></div>)}</div></div>
-      </div>
-    </section>}
+    {tab==='analytics'&&<section className="analyticsSection"><div className="sectionHead"><div><span>{analytics.finishedMatches.length} матчей в выборке</span><h2>Глубокая аналитика</h2></div><div className="locked">автообновление</div></div><div className="analyticsLead">Кто играет осторожно, кто идёт против толпы и какие команды каждый из вас системно переоценивает. Метрики считаются только по завершённым турам.</div><div className="analyticsKpis"><div><span>⚽ Фактический тотал</span><strong>{analytics.finishedMatches.length?(analytics.actualGoals/analytics.finishedMatches.length).toFixed(2):'—'}</strong><small>гола за матч</small></div><div><span>👑 Лидер</span><strong>{joinNames(analytics.awards.mvp)}</strong><small>{analytics.awards.mvp[0]?.points||0} очк.</small></div><div><span>🎯 Снайпер</span><strong>{joinNames(analytics.awards.sniper)}</strong><small>{analytics.awards.sniper[0]?.exact||0} точных</small></div><div><span>🧮 Лучший MAE</span><strong>{joinNames(analytics.awards.bestMae)}</strong><small>{analytics.awards.bestMae[0]?.mae.toFixed(2)||'—'} гола</small></div></div><div className="sectionHead analyticsSub"><div><span>Стиль прогнозирования</span><h2>Почерк игроков</h2></div></div><div className="profileGrid">{analytics.profiles.map(p=><article className="profileCard" key={p.id}><div className="profileTop"><strong>{p.name}</strong><b>{p.points} очк.</b></div><div className="profileOutcomes"><span>П1 <b>{p.p1}</b></span><span>Х <b>{p.draws}</b></span><span>П2 <b>{p.p2}</b></span></div><div className="profileStats"><span>MAE <b>{p.mae.toFixed(2)}</b></span><span>Тотал <b>{p.avgTotal.toFixed(2)}</b></span><span>Против толпы <b>{p.against}</b></span></div></article>)}</div><div className="sectionHead analyticsSub"><div><span>Номинации</span><h2>Психотипы</h2></div></div><div className="awardsGrid analyticsAwards"><div className="awardCard"><span>🤝 Мистер Х</span><strong>{joinNames(analytics.awards.misterX)}</strong><p>{analytics.awards.misterX[0]?.draws||0} ничьих в прогнозах</p></div><div className="awardCard"><span>✈️ Away Ultras</span><strong>{joinNames(analytics.awards.away)}</strong><p>{analytics.awards.away[0]?.p2||0} побед гостей</p></div><div className="awardCard"><span>🔥 Overman</span><strong>{joinNames(analytics.awards.over)}</strong><p>{analytics.awards.over[0]?.avgTotal.toFixed(2)||'—'} ожидаемого гола</p></div><div className="awardCard"><span>🐴 Contrarian</span><strong>{joinNames(analytics.awards.contrarian)}</strong><p>{analytics.awards.contrarian[0]?.against||0} раз против консенсуса</p></div><div className="awardCard"><span>🚂 Главный оптимист по Локо</span><strong>{analytics.awards.locoFan?.name||'—'}</strong><p>{analytics.awards.locoFan?`${analytics.awards.locoFan.predPpg.toFixed(2)} ожидаемого очка / матч`:'—'}</p></div><div className="awardCard"><span>🐷 Главный пессимист по Спартаку</span><strong>{analytics.awards.spartakHater?.name||'—'}</strong><p>{analytics.awards.spartakHater?`${analytics.awards.spartakHater.predPpg.toFixed(2)} ожидаемого очка / матч`:'—'}</p></div></div><div className="analyticsTwoCol"><div><div className="sectionHead analyticsSub"><div><span>Редкие попадания</span><h2>Уникальные точные</h2></div></div><div className="insightList">{analytics.uniqueExact.length?analytics.uniqueExact.slice(0,6).map((x,i)=><div className="insightRow" key={`${x.round}-${x.match}-${i}`}><span>Тур {x.round}</span><strong>{x.name}</strong><p>{x.match} · {x.score}</p></div>):<div className="emptyAnalytics">Пока нет уникальных точных счетов</div>}</div></div><div><div className="sectionHead analyticsSub"><div><span>Клубные ожидания</span><h2>Самые сильные bias</h2></div></div><div className="insightList">{analytics.biggestBias.map((x,i)=><div className="insightRow" key={`${x.playerId}-${x.team}-${i}`}><span>{x.bias>0?'переоценка':'недооценка'} {x.bias>0?'+':''}{x.bias.toFixed(2)} PPG</span><strong>{x.name} · {x.team}</strong><p>ожидал {x.predPpg.toFixed(2)} · факт {x.actualPpg.toFixed(2)}</p></div>)}</div></div></div></section>}
     {message&&<div className="historyHint" style={{marginTop:16}}>{message}</div>}
   </main>
 }
